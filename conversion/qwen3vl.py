@@ -144,6 +144,15 @@ class Qwen3VLVisionModel(MmprojModel):
         yield from MmprojModel.modify_tensors(self, data_torch, name, bid)
 
 
+@ModelBase.register("SenseNovaLoopForConditionalGeneration")
+class SenseNovaLoopVisionModel(Qwen3VLVisionModel):
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        size = self.preprocessor_config["size"]
+        self.gguf_writer.add_vision_min_pixels(int(size["shortest_edge"]))
+        self.gguf_writer.add_vision_max_pixels(int(size["longest_edge"]))
+
+
 @ModelBase.register("MiniCPMOCRForSequenceClassification")
 class MiniCPMOCRSeqClsVisionModel(Qwen3VLVisionModel):
     def set_gguf_parameters(self):

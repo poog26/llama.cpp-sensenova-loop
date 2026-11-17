@@ -1,87 +1,72 @@
-# sensenova_loop in llama.cpp
+# SenseNova-Loop-9B: build and run
 
-Native support for **SenseNova-Loop-9B-Preview** (SenseNova / OpenSenseNova), text decoder only.
+This branch includes the compatible runtime and converter for the **November 17, 2026 final release** of [SenseNova-Loop-9B](https://huggingface.co/sensenova/SenseNova-Loop-9B), as well as the Preview. Clone this fork directly; no patches need to be applied.
 
-This is a fork of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) at `aa588a3`,
-carrying two commits on the `sensenova-loop` branch. Stock llama.cpp refuses the architecture
-with `unknown model architecture: 'sensenova_loop'`.
+GGUF downloads: [sld26t/SenseNova-Loop-9B-GGUF](https://huggingface.co/sld26t/SenseNova-Loop-9B-GGUF).
 
-## What the model needs
+Stock llama.cpp, LM Studio, and Ollama do not currently implement this architecture.
 
-A Qwen3.5 hybrid trunk (linear-attention blocks, full attention every fourth block) whose middle
-block is executed twice, with **two residual streams** and a router on every sublayer inside the
-repeated range. The router normalises across both streams, projects eight logits, applies two
-input gates, one output gate per stream, and a 2x2 mixing matrix that twenty sinkhorn passes turn
-into a doubly stochastic one.
+## Build the tested CPU tools
 
-## What this branch adds
+Install CMake, Ninja, and a C++ compiler. On Windows, use a Visual Studio developer terminal so MSVC is available. The following headless build avoids an unrelated prebuilt web-UI asset dependency:
 
-- `sensenova_loop` architecture: hparams, tensor map, hybrid memory, graph, converter
-  (`conversion/sensenova.py`). The loop is expanded into one block per visit so the existing
-  hybrid machinery gives each visit fresh recurrent state and KV.
-- **The repeated block is stored once.** The file holds 32 physical blocks; the loader aliases the
-  second visit (virtual blocks 28-51) onto the first visit's tensors with a layer-record copy, so
-  nothing is duplicated in VRAM or on disk. A file that duplicates the weights also loads, it is
-  just 56 percent bigger.
-- Two fused ops, `ggml_mhc_route` and `ggml_mhc_merge`, on the CPU **and** as Vulkan compute
-  shaders. Without them a router is ~110 graph nodes and the graph does not fit its node budget;
-  with them it is two nodes and stays on device.
-
-## Build
-
-```bash
-cmake -B build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j --target llama-cli llama-server llama-quantize
+```sh
+git clone --branch sensenova-loop --single-branch https://github.com/poog26/llama.cpp-sensenova-loop.git
+cd llama.cpp-sensenova-loop
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=OFF -DGGML_NATIVE=OFF -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_SERVER=OFF
+cmake --build build --target llama-completion llama-mtmd-cli llama-quantize -j 2
 ```
 
-## Convert and quantize
+Executables are in `build/bin`; add `.exe` on Windows. These CPU tools were built and tested on Windows. CUDA and Vulkan support are inherited from the base fork but were not validated for this final-release export; see [backend build documentation](../docs/build.md) before enabling them.
 
-```bash
-python3 convert_hf_to_gguf.py /path/to/SenseNova-Loop-9B-Preview \
-    --outtype f16 --outfile sensenova-f16.gguf
-./build/bin/llama-quantize sensenova-f16.gguf sensenova-Q4_0.gguf Q4_0
+## Text
+
+Download a text GGUF, for example `SenseNova-Loop-9B-Q4_K_S.gguf`. From a terminal where that file is available, run the built `llama-completion` with:
+
+```sh
+./build/bin/llama-completion -m SenseNova-Loop-9B-Q4_K_S.gguf -c 1024 -b 32 -ub 32 -t 2 -ngl 0 --no-repack --no-warmup --single-turn -p "What is 13 times 7?" -n 128 --temp 0
 ```
 
-Convolution kernels stay F32 (`ssm_conv` requires it), and the router weights and biases stay
-F32, so those tensors are pinned by the converter and by the quantizer.
+Adjust the model path if the GGUF lives elsewhere. Text-only inference does not require a projector. The supplied chat template supports thinking, which can consume output tokens before the final answer.
 
-## Run
+## Images
 
-```bash
-GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1 ./build/bin/llama-server \
-    -m sensenova-Q4_0.gguf -ngl 99 -c 4096 -fa on --port 8080
+Also download `mmproj-SenseNova-Loop-9B-F16.gguf`. The same projector is used with any of the text quants:
+
+```sh
+./build/bin/llama-mtmd-cli -m SenseNova-Loop-9B-Q4_K_S.gguf --mmproj mmproj-SenseNova-Loop-9B-F16.gguf --image image.png -p "Describe the image." -c 1024 -b 32 -ub 32 -t 2 -ngl 0 --no-mmproj-offload --no-repack --no-warmup --image-min-tokens 64 --image-max-tokens 64 -n 128 --temp 0
 ```
 
-On a small-BAR card (RX 5700 XT and friends) the environment variable matters: without it the
-recurrent-state buffers land in host-visible memory and decode runs at roughly 55 percent of what
-the card can do. It only works once the model fits in VRAM.
+The small image-token budget is a smoke-test setting, not a quality recommendation for detailed images. Increase the image budget and context together for real use, within available memory.
 
-## Measured
+## Conversion and precision fixes
 
-RX 5700 XT (NAVI10), 4096 context, `-ngl 99`, temperature 0:
+The converter accepts the original Hugging Face checkpoint with `--outtype bf16`; add `--mmproj --outtype f16` for the vision projector. Run `convert_hf_to_gguf.py --help` for input/output options and install its dependencies from the repository requirements.
 
-| quant | file | decode |
-|---|---:|---:|
-| Q4_0 | 5.33 GB | 31.4 t/s |
-| Q4_K_M | 5.63 GB | 30.5 t/s |
-| Q3_K_M | 4.64 GB | 29.9 t/s |
+- The loop runs 56 logical blocks using 32 stored physical decoder layers; repeat visits alias the shared tensors rather than duplicating weights.
+- All 120 mHC routing and recurrent convolution tensors are explicitly kept F32, including the virtual tail blocks after the loop.
+- Final-release YaRN metadata is preserved: factor 2, original context 262144, configured maximum 524288.
+- The final checkpoint has no MTP head.
+- The published reference model does not register or use the checkpoint's extra `model.language_model.loop_gate.logits` parameter. A meta-device comparison found that this was the only unexpected key, with no missing keys. Its exact F32 values are preserved as provenance metadata under `sensenova_loop.source_unused.loop_gate.logits`.
+- Vision export registers the model's existing Qwen3.5 vision tower and records its original image-resizing limits.
 
-For reference, Qwen3.8-9B Q4_K_M (5.78 GB, no recurrent layers) does 51.7 t/s on the same card
-with the same flag. The difference is the loop: this model executes 56 blocks per token for 32
-stored, so it moves ~1.75x the bytes per token. Q3_K_M being slower than Q4_0 despite a smaller
-file is the RDNA1 dequant tax (no integer dot), not a bug.
+## Verified behavior
 
-## Accuracy
+Windows, CPU, Q4_K_S with the F16 projector:
 
-Greedy decoding matches the reference `transformers` implementation token for token on the
-16-token prompt used for development (`The capital of France is` at temperature 0), and the fused
-ops agree with their CPU implementation to 1.2e-7 on random inputs. No perplexity or KL sweep has
-been run on these quants.
+- Arithmetic: 13 times 7 produced 91.
+- A solid red image produced Red; changing only the pixels to blue produced Blue.
+- Text export contains 523 tensors; the projector contains 334.
+- GGUF metadata, tensor shapes, and protected F32 tensor types were checked.
 
-## Applying this to your own tree
+These are smoke checks, not full numerical parity or a quality benchmark. GPU performance, long-context behavior, video, and broad multimodal accuracy have not been validated here.
 
-`sensenova/patches/` holds the two commits as patches:
+## Attribution
 
-```bash
-git am sensenova/patches/*.patch
-```
+Original model: SenseNova / OpenSenseNova, Apache-2.0.
+
+Runtime and shared-layer/mHC implementation: [GuideboardLabs/llama.cpp-sensenova-loop](https://github.com/GuideboardLabs/llama.cpp-sensenova-loop), based on llama.cpp, at `fad174ecd8bf22746a626c58e67e193f095aaa46`.
+
+Vision registration adapted from [annelo's vision converter work](https://huggingface.co/annelo/SenseNova-Loop-9B-Preview-Q4_K_M-Vision-GGUF/blob/main/runtime/03-sensenova-loop-vision.patch).
+
+The code retains llama.cpp's MIT license. This fork adds the final-release precision/provenance fixes and integrated vision export.

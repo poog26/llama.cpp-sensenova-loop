@@ -1,5 +1,10 @@
 # llama.cpp
 
+## SenseNova-Loop-9B final release
+
+This fork includes the SenseNova Loop runtime from GuideboardLabs, final-release conversion fixes, and vision-projector export. **Use the [SenseNova build and run guide](sensenova/README.md)** with the [GGUF models](https://huggingface.co/sld26t/SenseNova-Loop-9B-GGUF). No patch application is needed. The generic upstream installers below do not install this fork.
+
+
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
 
 <div align="center">

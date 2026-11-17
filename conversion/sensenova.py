@@ -27,7 +27,7 @@ from torch import Tensor
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import gguf
-from . import ModelBase, logger
+from . import ModelBase, LazyTorchTensor, logger
 from .qwen import Qwen3_5TextModel
 
 
@@ -118,7 +118,22 @@ class SenseNovaLoopModel(Qwen3_5TextModel):
             self.gguf_writer.add_array(gguf.Keys.MHC.LAYER_KINDS.format(arch=arch), self.kinds)
             logger.info(f"mHC: {streams} streams, {int(self.mhc['iterations'])} sinkhorn iterations")
 
+    def tensor_force_quant(self, name, new_name, bid, n_dims):
+        # Match the exported name: physical and virtual block IDs diverge
+        # after the shared loop, so physical-ID-based matching misses the tail.
+        if "mhc_" in new_name or "ssm_conv1d" in new_name:
+            return gguf.GGMLQuantizationType.F32
+        return super().tensor_force_quant(name, new_name, bid, n_dims)
+
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if name == "model.loop_gate.logits":
+            # The final checkpoint includes this parameter, but its published
+            # reference model does not register or use it. Preserve its exact
+            # F32 values as provenance metadata, not as an inference tensor.
+            values = LazyTorchTensor.to_eager(data_torch).float().tolist()
+            self.gguf_writer.add_array("sensenova_loop.source_unused.loop_gate.logits", values)
+            return
+
         if name.startswith("model.visual.") or name.startswith("mtp."):
             return  # text-only: vision tower and the MTP head stay out of this file
 
